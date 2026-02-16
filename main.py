@@ -11,37 +11,21 @@ from dotenv import load_dotenv
 from tree_sitter import Language, Parser, Node, Query, QueryCursor
 from query_strings import QUERIES as Q_Strings
 from conditional_import import get_spc_language
+from async_lru import alru_cache
+from aiocache import Cache
 
 load_dotenv()
 # socks_proxy = os.getenv("GEMINI_PROXY")
 OPENROUTER_API = os.getenv("OPENR_API_KEY")
 FILE_PATH = "standalone-backend.ts"
-
+CACHE_DURATION = 5
 OPENROUTER_CLIENT = AsyncOpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key = OPENROUTER_API,
 )
+UNAME_CACHE = Cache(Cache.MEMORY)
 
-
-    
-def get_ext(filename : str):
-    return filename.split('.')[-1]
-
-async def find_function_by_name(
-    file_path : str,
-    func_name: str,
-) -> str | list[str] | None:
-    file_ext = get_ext(file_path)
-    async with aiofiles.open(FILE_PATH, mode='r') as f:
-        source_code = await f.read()
-    if isinstance(source_code, str):
-        source_bytes = source_code.encode("utf-8")
-    else:
-        source_bytes = source_code
-
-    query_string = Q_Strings.get(file_ext)
-    lang = Language(get_spc_language(file_ext))
-
+def sync_parse_and_find(source_bytes, lang, query_string, func_name):
     parser = Parser(lang)
     tree = parser.parse(source_bytes)
 
@@ -53,21 +37,49 @@ async def find_function_by_name(
     for match in matches:
         if match[1].get('name')[0].text.decode('utf-8') == func_name:
             return match[1].get('function.def')[0].text.decode('utf-8')
-
     return None
+    
+def get_ext(filename : str):
+    return filename.split('.')[-1]
 
+async def find_function_by_name(
+    file_path : str,
+    func_name: str,
+) -> str | list[str] | None:
+    file_ext = get_ext(FILE_PATH)
+    source_code = await get_source_code(FILE_PATH)
+    # if isinstance(source_code, str):
+    #     source_bytes = source_code.encode("utf-8")
+    # else:
+    #     source_bytes = source_code
+    source_bytes = source_code.encode("utf-8")
+
+    query_string = Q_Strings.get(file_ext)
+    lang = Language(get_spc_language(file_ext))
+
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, sync_parse_and_find, source_bytes, lang, query_string, func_name)
+    parser = Parser(lang)
+
+    return result
+
+@alru_cache(maxsize=4 , ttl= 5 * 60)
+async def get_source_code(file_path = FILE_PATH):
+    print("get source code called!")
+    async with aiofiles.open(file_path, mode='r') as f:
+        contents = await f.read()
+        return contents
+    
 async def formatting_tools(tool_name, param):
     if tool_name == "whole_project_summary":
-        async with aiofiles.open(FILE_PATH, mode='r') as f:
-            contents = await f.read()
-            return contents
-    if tool_name == "code_section_summary":
-        lines = param.split(',')
-        async with aiofiles.open(FILE_PATH, mode='r') as f:
-            subset = islice(f, lines[0], lines[1])
-            code_section = list(subset)
+        return await get_source_code(FILE_PATH)
+    # if tool_name == "code_section_summary":
+    #     lines = param.split(',')
+    #     async with aiofiles.open(FILE_PATH, mode='r') as f:
+    #         subset = islice(f, lines[0], lines[1])
+    #         code_section = list(subset)
 
-            return code_section
+            # return code_section
     if tool_name == "function_summary":
         contents = await find_function_by_name(file_path=FILE_PATH , func_name=param)
         return contents
@@ -78,6 +90,8 @@ with open('prompts/match_to_tool.txt' , 'r') as f:
 with open('prompts/source_code.txt' , 'r') as f:
     SYS_INST_SOURCE_SUM = f.read()
 
+
+# @alru_cache(maxsize=16)
 async def agent_tool_match(user_prompt: str):
     response = await OPENROUTER_CLIENT.chat.completions.create(
     model="arcee-ai/trinity-large-preview:free", 
@@ -94,7 +108,9 @@ async def agent_tool_match(user_prompt: str):
     except Exception as e:
         return ''
     
+@alru_cache(maxsize=4 , ttl= 5 * 60)
 async def agent_code_sum(source_code: str):
+    print("code summary called!")
     response = await OPENROUTER_CLIENT.chat.completions.create(
     model="arcee-ai/trinity-large-preview:free", 
     # model="arcee-ai/trinity-mini:free", 
@@ -114,9 +130,17 @@ def extract_payload(ws_payload : str):
     return json.loads(ws_payload.split(',' ,maxsplit=1)[1][:-1])
 
 
-def ask_user_prompt(comment : str , username : str):
+async def ask_user_prompt(payload : dict):
+    username = payload.get('username')
+    comment = payload.get('comment')
     if username in ['cholemo' , 'looping']:
         if comment.startswith('$ask'):
+
+            if await UNAME_CACHE.exists(username):
+                print(f"{username} is on cooldown!")
+                return ''
+            
+            await UNAME_CACHE.set(username, True, ttl=60)
             return comment.split('$ask' , maxsplit= 1)[-1]
         else: return ''
     else: return ''
@@ -180,14 +204,14 @@ async def main():
                 print("Received Ping (2), Sent Pong (3)")
             if message.startswith('''42["comment"'''):
                 payload_json = extract_payload(ws_payload=message)
-                tool_match_prompt = ask_user_prompt(payload_json.get('comment') , payload_json.get('username'))
+                tool_match_prompt = await ask_user_prompt(payload = payload_json)
                 if tool_match_prompt:
-                    print(tool_match_prompt)
-
+                    
                     agent_tool_resp = await agent_tool_match(tool_match_prompt)
-                    if agent_tool_match:
+                    print(agent_tool_resp)
+                    if agent_tool_resp:
+                        source_code = await formatting_tools(agent_tool_resp.get('tool_name'),agent_tool_resp.get('parameter'))
                         print('agent_tool_match')
-                        source_code = await formatting_tools(agent_tool_resp.get('tool_name'),agent_tool_resp.get('param'))
                         if source_code:
                             print('agent_source_code')
 
