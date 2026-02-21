@@ -34,7 +34,9 @@ async def agent_code_sum(source_code: str):
             {"role": "system", "content": SYS_INST_SOURCE_SUM},
             {"role": "user", "content": f"Source Code to analyze:\n{source_code}"}
         ],
-        temperature=1,
+        temperature=0,
+        top_p=0,
+        max_tokens=300
     )
     try:
         return response.choices[0].message.content
