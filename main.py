@@ -9,8 +9,22 @@ from api.server import start_local_server
 from services.aparat_client import get_jwt, send_llm_response, send_periodic_request, extract_payload, ask_user_prompt
 from services.llm_agent import agent_tool_match, formatting_tools, agent_code_sum
 
-async def main(user_data : dict):
-    await start_local_server(port=10000)
+
+async def send_buffer(lock , shared_buffer , ws , streamer_key):
+    while True:
+        await asyncio.sleep(5)
+        if len(shared_buffer) > 0:
+            async with lock:
+                entry = shared_buffer[0]
+                await send_llm_response(ws , entry.get('message') ,streamer_key ,entry.get('guid'))
+                shared_buffer.pop(0)
+
+
+async def main():
+    shared_send_reply = []
+    lock = asyncio.Lock()
+
+    await start_local_server()
     
     websocket_url = "wss://lws.aparat.com/socket.io/?EIO=3&transport=websocket"
     streamer_data = await get_jwt()
@@ -33,6 +47,7 @@ async def main(user_data : dict):
             await websocket.send(join_packet)
 
             asyncio.create_task(send_periodic_request(websocket, streamer_data, interval=5))
+            asyncio.create_task(send_buffer(lock , shared_send_reply , websocket , streamer_key))
             
             async for message in websocket:
                 if message == "2":
@@ -51,21 +66,29 @@ async def main(user_data : dict):
                                 agent_tool_resp.get('parameter'), 
                                 state.latest_file_path
                             )
-                            
-                            if source_code:
-                                agent_sum_to_user = await agent_code_sum(source_code=source_code)
-                                print("RESPONSE:", agent_sum_to_user)
-                                await send_llm_response(websocket , agent_sum_to_user , streamer_key , tool_match_prompt_dict.get('reply_guid'))
-                            else:
-                                await send_llm_response(websocket , "😛" , streamer_key , tool_match_prompt_dict.get('reply_guid'))
-
+                            async with lock:
+                                if source_code:
+                                    agent_sum_to_user = await agent_code_sum(source_code=source_code)
+                                    print("RESPONSE:", agent_sum_to_user)
+                                    shared_send_reply.append({
+                                        'message' : agent_sum_to_user[:300],
+                                        'guid' : tool_match_prompt_dict.get('reply_guid')
+                                    })
+                                        
+                                else:
+                                    shared_send_reply.append({
+                                        'message' : "😛",
+                                        'guid' : tool_match_prompt_dict.get('reply_guid')
+                                    })
     except Exception as e:
         print(f"Fatal error in main loop: {e}")
     finally:
         state.save_state()
         print("State saved. Shutting down.")
+    
+
 
 if __name__ == "__main__":
     user_data = get_user_data()
     if user_data:
-        asyncio.run(main(user_data=user_data))
+        asyncio.run(main())

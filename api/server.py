@@ -5,11 +5,12 @@ async def handle_post(request):
     try:
         data = await request.json()
         state.latest_file_path = data.get('path')
+        print(state.latest_file_path)
     except Exception:
         return web.json_response({"error": "Invalid JSON"}, status=400)
     return web.Response(text="Success!")
 
-async def start_local_server(port=10000):
+async def start_local_server(port=39804):
     app = web.Application()
     app.add_routes([web.post('/filepath', handle_post)])
     

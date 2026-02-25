@@ -14,6 +14,7 @@ async def ask_user_prompt(payload: dict):
     comment = payload.get('comment')
     
     if username in core.config.STREAMER_NAMES and comment.startswith('$ask'):
+    # if comment.startswith('$ask'):
         reply_guid = payload.get('guid')
         if await core.config.UNAME_CACHE.exists(username):
             print(f"{username} is on cooldown!")
@@ -56,13 +57,17 @@ async def send_llm_response(websocket , llm_response , room_key , sender_guid):
     global PINGPONG_COUNTER
     response = f"/replay {sender_guid} {llm_response}"
     payload = ["comment",{"data":{"username":core.config.APARAT_LUSER,
-                                  "key":room_key,
-                                  "name":"",
-                                  "comment":response[:150],
-                                  "isb":"true"}
-                ,"header":{"luser":core.config.APARAT_LUSER,
-                           "ltoken":core.config.APARAT_LTOKEN,
-                           "source":"aparat"}}]
+                                    "key":room_key,
+                                    "name":"",
+                                    "comment":response[:150],
+                                    "isb":"true"}
+                    ,"header":{"luser":core.config.APARAT_LUSER,
+                            "ltoken":core.config.APARAT_LTOKEN,
+                            "source":"aparat"}}]
+    await websocket.send(f"42{PINGPONG_COUNTER}{json.dumps(payload)}")
+    await asyncio.sleep(2)
+    if len(response) > 150:
+        payload[1].get('data')['comment'] = response[150:] 
+        await websocket.send(f"42{PINGPONG_COUNTER}{json.dumps(payload)}")
+
     
-    a = await websocket.send(f"42{PINGPONG_COUNTER}{json.dumps(payload)}")
-    print(a)

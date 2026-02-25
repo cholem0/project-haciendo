@@ -1,1 +1,1 @@
-/home/cho/coding/chat-code-support/ws-aparat.py
+/home/cho/coding/chat-code-support/project-haciendo/services/code_analyzer.py
